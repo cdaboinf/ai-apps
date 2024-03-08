@@ -33,43 +33,6 @@ class chat_service():
         self.embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
         self.mongo_client =pymongo.MongoClient(os.getenv("MONGO_URI"))
         self.mongo_db_vector = os.getenv("MONGO_CONTEXT_VECTOR_SEARCH")
-
-        self.mem_cache = {}
-
-
-        #get cached chat
-        r = redis.Redis(host=self.redis_host, port=self.redis_port, password=self.redis_password)
-
-        chat_messages = []
-
-        #if null - create cache for new chat
-        if(not r.exists(request.cache_key)):
-            chat_messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": request.query}
-            ]
-            
-        #if exists - add new role user query to messages
-        else:
-            chat_messages.extend(json.loads(r.get(request.cache_key)))
-            chat_messages.append({"role": "user", "content": request.query})
-
-        # OpenAI request
-        response = self.open_ai_client.chat.completions.create(
-            model=self.model,
-            messages= chat_messages,
-            temperature=0,
-        )
-
-        # append last open-ai response
-        chat_model = json.loads(response.model_dump_json())
-        chat_messages.append({"role": "assistant", "content": chat_model["choices"][0]["message"]["content"]})
-        
-        # cache updated chat messages/expires in 2 mins after last update
-        r.set(request.cache_key, json.dumps(chat_messages))
-        r.expire(request.cache_key, 300) 
-
-        return chat_messages
     
     def process_rag_chat(self, request: chat_request):
         db = self.mongo_client.CustomsServices
