@@ -8,23 +8,31 @@ from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 
-import json
-import os
 import pymongo
+import os
 
 class rag_service():
-    def __init__(self, api_key):
-        self.OPENAI_API_KEY = api_key
-        #self.api_key = api_key
+    instance = None
+
+    def __new__(cls):
+        if not cls.instance:
+            cls.instance = super().__new__(cls)
+        return cls.instance
+    
+    def __init__(self):
+        self.upload_directory = os.getenv("UPLOAD_DIRECTORY")
+        self.mongo_db_vector = os.getenv("MONGO_VECTOR_SEARCH")
+        self.mongo_uri = os.getenv("MONGO_URI")
+
+        self.mongo_client =pymongo.MongoClient(os.getenv("MONGO_URI"))
+        self.embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
+        self.llm = OpenAI(openai_api_key=os.getenv("OPENAI_API_KEY"), temperature=0)
+
 
     def upload_document(self, file: UploadFile):
-        OPENAI_API_KEY = ""
-        ATLAS_VECTOR_SEARCH_INDEX_NAME = "doc_vector_search"
-        MONGO_URI = ""
-
         try:
             file_type = file.content_type
-            file_path = f"C:\\Users\\carlos.daboin\\Documents\\Dev\\Test-Apps\\python-ai\\ai-apps\\open-ia-services\\app\\routers\\files\\{file.filename}"
+            file_path = f"{self.upload_directory}{file.filename}"
             with open(file_path, "wb") as f:
                 f.write(file.file.read())
         except Exception:
@@ -32,25 +40,21 @@ class rag_service():
         finally:
             file.file.close()
 
-        EMBEDDING_FIELD_NAME = "embedding"
-        client = pymongo.MongoClient(MONGO_URI)
-        db = client.CustomsVectorSearch
+        db = self.mongo_client.CustomsVectorSearch
         mdbcollection = db.SpecDocuments
 
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-
         if file_type == "text/plain":
-            loader = DirectoryLoader("C:\\Users\\carlos.daboin\\Documents\\Dev\\Test-Apps\\python-ai\\ai-apps\\open-ia-services\\app\\routers\\files", glob=file.filename, show_progress=True)
+            loader = DirectoryLoader(self.upload_directory, glob=file.filename, show_progress=True)
             data = loader.load()
 
             x = MongoDBAtlasVectorSearch.from_documents(
                 documents=data, 
-                embedding=embeddings, 
+                embedding=self.embeddings, 
                 collection=mdbcollection, 
-                index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME)
+                index_name=self.mongo_db_vector)
 
         if file_type == "application/pdf":
-            loader = PyPDFLoader(f"C:\\Users\\carlos.daboin\\Documents\\Dev\\Test-Apps\\python-ai\\ai-apps\\open-ia-services\\app\\routers\\files\\{file.filename}")
+            loader = PyPDFLoader(f"{self.upload_directory}{file.filename}")
             data = loader.load()
 
             text_splitter = RecursiveCharacterTextSplitter(chunk_size = 1000, chunk_overlap = 50)
@@ -59,24 +63,18 @@ class rag_service():
             # insert the documents in MongoDB Atlas Vector Search
             x = MongoDBAtlasVectorSearch.from_documents(
                 documents=docs, 
-                embedding=embeddings, 
+                embedding=self.embeddings, 
                 collection=mdbcollection, 
-                index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME)
+                index_name=self.mongo_db_vector)
 
         return file.filename
 
     def search(self, request: chat_request):
-        OPENAI_API_KEY = ""
-        ATLAS_VECTOR_SEARCH_INDEX_NAME = "doc_vector_search"
-        MONGO_URI = ""
-
         # vector store object
-        client = pymongo.MongoClient(MONGO_URI)
-        db = client.CustomsVectorSearch
+        db = self.mongo_client.CustomsVectorSearch
         mdbcollection = db.SpecDocuments
 
-        embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
-        vectorStore = MongoDBAtlasVectorSearch(mdbcollection, embeddings, index_name=ATLAS_VECTOR_SEARCH_INDEX_NAME)
+        vectorStore = MongoDBAtlasVectorSearch(mdbcollection, self.embeddings, index_name=self.mongo_db_vector)
 
         # Convert question to vector using OpenAI embeddings
         # Perform Atlas Vector Search using Langchain's vectorStore
@@ -89,7 +87,7 @@ class rag_service():
         # Define the LLM that we want to use -- note that this is the Language Generation Model and NOT an Embedding Model
         # If it's not specified (for example like in the code below),
         # then the default OpenAI model used in LangChain is OpenAI GPT-3.5-turbo, as of August 30, 2023
-        llm = OpenAI(openai_api_key=OPENAI_API_KEY, temperature=0)
+        # self.llm
 
         # Get VectorStoreRetriever: Specifically, Retriever for MongoDB VectorStore.
         # Implements _get_relevant_documents which retrieves documents relevant to a query.
@@ -97,7 +95,7 @@ class rag_service():
 
         # Load "stuff" documents chain. Stuff documents chain takes a list of documents,
         # inserts them all into a prompt and passes that prompt to an LLM.
-        qa = RetrievalQA.from_chain_type(llm, chain_type="stuff", retriever=retriever)
+        qa = RetrievalQA.from_chain_type(self.llm, chain_type="stuff", retriever=retriever)
 
         # Execute the chain
         retriever_output = qa.run(request.query)
@@ -105,15 +103,5 @@ class rag_service():
         return { "vector": as_output, "llm": retriever_output }
 
     def clear_document(self, request: chat_request):
-        MONGO_URI = ""
-        client = pymongo.MongoClient(MONGO_URI)
-        db = client.CustomsVectorSearch
+        db = self.mongo_client.CustomsVectorSearch
         db.SpecDocuments.delete_many({})
-
-    def __get_specs_collection():
-        connection_string = "mongodb+srv://carlosdaboin:tg2yFWrEazgqve1V@clusterukgrapidsearch.v9zv1e4.mongodb.net/?retryWrites=true&w=majority"
-        client = pymongo.MongoClient(connection_string)
-        db = client.CustomsVectorSearch
-        collection = db.SpecDocuments
-    
-        return collection
