@@ -1,5 +1,4 @@
 from openai import OpenAI
-from models.chat_document import chat_document
 from models.chat_message import chat_message
 from models.chat_request import chat_request
 from langchain.vectorstores import MongoDBAtlasVectorSearch
@@ -8,11 +7,11 @@ from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings.openai import OpenAIEmbeddings
 from fastapi import UploadFile
+from clients.mongodb_client import mongodb_client
+from clients.openai_client import openai_client
 
 import json
 import os
-import redis
-import pymongo
 
 class chat_service():
     instance = None
@@ -31,74 +30,33 @@ class chat_service():
 
         self.open_ai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
         self.embeddings = OpenAIEmbeddings(openai_api_key=os.getenv("OPENAI_API_KEY"))
-        self.mongo_client =pymongo.MongoClient(os.getenv("MONGO_URI"))
-        self.mongo_db_vector = os.getenv("MONGO_CONTEXT_VECTOR_SEARCH")
+        self.mongo_client = mongodb_client()
+        self.openai = openai_client()
     
     def process_rag_chat(self, request: chat_request):
-        db = self.mongo_client.CustomsServices
-        mdbcollection = db.ContextData
-        chatcollection = db.ChatMessages
-           
-        #get cached chat
-        r = redis.Redis(host=self.redis_host, port=self.redis_port, password=self.redis_password)
-
         chat_messages = []
 
-        #if null - create cache for new chat
-        #if(not r.exists(request.cache_key)): # redis cache check
-        chat_query = chatcollection.find_one({'key': request.cache_key})
+        chat_query = self.mongo_client.find_chat(request)
         if(chat_query is None):
-            # vector store object
-            vectorStore = MongoDBAtlasVectorSearch(mdbcollection, self.embeddings, index_name=self.mongo_db_vector)
-
-            # Convert question to vector using OpenAI embeddings
-            # Perform Atlas Vector Search using Langchain's vectorStore
-            # similarity_search returns MongoDB documents most similar to the query
-            search_result = ''  
-            docs = vectorStore.similarity_search(request.query, K=1)
-            for doc in docs:
-                search_result += f"{doc.page_content}\\n"
-                
+            # vector context search
+            search_result = self.mongo_client.chat_context_search(request)
             chat_messages=[
                 chat_message(role="system",content="You are a helpful assistant."),
                 chat_message(role="user",content="Answer this user query: " + request.query + " with the following context: " + search_result)
             ]
             
-        #if exists - add new role user query to messages
         else:
-            # redis cache retrieval 
-            #chat_messages.extend(json.loads(r.get(request.cache_key)))
-            # memory cache retrieval
             chat_messages.extend(chat_query["messages"])
             chat_messages.append(chat_message(role="user", content=request.query))
 
-        # OpenAI request
-        response = self.open_ai_client.chat.completions.create(
-            model=self.model,
-            messages= chat_messages,
-            temperature=0,
-        )
+        # openAI request
+        response = self.openai.process_chat(chat_messages)
 
-        # append last open-ai response
         chat_model = json.loads(response.model_dump_json())
         chat_messages.append(chat_message(role="assistant", content=chat_model["choices"][0]["message"]["content"]))
-        
-        # cache updated chat messages/expires in 2 mins after last update
-        # redis
-        #r.set(request.cache_key, json.dumps(chat_messages))
-        #r.expire(request.cache_key, 300)
+    
+        self.mongo_client.upsert_chat(request, chat_query, chat_messages)
 
-        # mongodb
-        if(chat_query is None):
-            chat =  chat_document(key=request.cache_key, messages=chat_messages)
-            document = chat.model_dump()
-            chatcollection.insert_one(document)
-        else:
-            chat =  chat_document(key=request.cache_key, messages=chat_messages)
-            document = chat.model_dump()
-            id = chat_query.get('_id')
-            chatcollection.update_one({'_id': id},{"$set": { "messages" : document["messages"]}},False)
-            
         return chat_messages
     
     def upload_rag_document_context(self, file: UploadFile):
